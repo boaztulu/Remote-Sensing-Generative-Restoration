@@ -1,0 +1,219 @@
+trainer:
+  target: trainer.TrainerDifIRLPIPS
+
+autoencoder:
+  target: ldm.models.autoencoder.VQModelTorch
+  ckpt_path: weights/autoencoder_vq_f4.pth
+  use_fp16: True
+  tune_decoder: False
+  params:
+    embed_dim: 3
+    n_embed: 8192
+    lora_tune_decoder: False
+    ddconfig:
+      double_z: False
+      z_channels: 3
+      resolution: 256
+      in_channels: 3
+      out_ch: 3
+      ch: 128
+      ch_mult:
+        - 1
+        - 2
+        - 4
+      num_res_blocks: 2
+      attn_resolutions: []
+      dropout: 0.0
+      padding_mode: zeros
+
+model:
+  target: models.unet.UNetModelSwin
+  ckpt_path: ~          # train from scratch for this SR setup
+  params:
+    image_size: 64
+    in_channels: 3
+    model_channels: 160
+    out_channels: ${autoencoder.params.embed_dim}
+    attention_resolutions: [64, 32, 16, 8]
+    dropout: 0
+    channel_mult: [1, 2, 2, 4]
+    num_res_blocks: [2, 2, 2, 2]
+    conv_resample: True
+    dims: 2
+    use_fp16: False
+    num_head_channels: 32
+    use_scale_shift_norm: True
+    resblock_updown: False
+    swin_depth: 2
+    swin_embed_dim: 192
+    window_size: 8
+    mlp_ratio: 4
+    cond_lq: True
+    lq_size: 64
+
+diffusion:
+  target: models.script_util.create_gaussian_diffusion
+  params:
+    sf: 4
+    schedule_name: exponential
+    schedule_kwargs:
+      power: 0.3
+    etas_end: 0.99
+    steps: 4
+    min_noise_level: 0.2
+    kappa: 2.0
+    weighted_mse: False
+    predict_type: xstart
+    timestep_respacing: ~
+    scale_factor: 1.0
+    normalize_input: True
+    latent_flag: True
+
+degradation:
+  sf: 4
+
+  # 1st degradation process (slightly milder / more realistic)
+  resize_prob: [0.2, 0.7, 0.1]      # up, down, keep
+  resize_range: [0.3, 1.3]          # avoid very tiny downscale / huge upscale
+  gaussian_noise_prob: 0.4
+  noise_range: [0.5, 15.0]
+  poisson_scale_range: [0.02, 1.5]
+  gray_noise_prob: 0.3
+  jpeg_range: [40, 95]
+
+  # 2nd degradation process (still used, but a bit softer)
+  second_order_prob: 0.4
+  second_blur_prob: 0.7
+  resize_prob2: [0.3, 0.4, 0.3]
+  resize_range2: [0.5, 1.1]
+  gaussian_noise_prob2: 0.4
+  noise_range2: [0.5, 10.0]
+  poisson_scale_range2: [0.02, 1.0]
+  gray_noise_prob2: 0.3
+  jpeg_range2: [40, 95]
+
+  gt_size: 256
+  resize_back: False
+  use_sharp: False
+
+  # a bit less aggressive sinc filtering
+  final_sinc_prob: 0.5
+
+data:
+  train:
+    type: realesrgan
+    params:
+      dir_paths: []
+      txt_file_path:
+        - /blue/rcstudents/btulu/Projects/Image_enhancement/Diff_model/data/farm_sr/high_res/train.txt
+      im_exts:
+        - png
+        - jpg
+        - jpeg
+        - tif
+        - tiff
+
+      io_backend:
+        type: disk
+
+      blur_kernel_size: 21
+      kernel_list:
+        - iso
+        - aniso
+        - generalized_iso
+        - generalized_aniso
+        - plateau_iso
+        - plateau_aniso
+      kernel_prob: [0.45, 0.25, 0.12, 0.03, 0.12, 0.03]
+      sinc_prob: 0.1
+      blur_sigma: [0.2, 2.0]
+      betag_range: [0.5, 4.0]
+      betap_range: [1, 2.0]
+
+      blur_kernel_size2: 15
+      kernel_list2:
+        - iso
+        - aniso
+        - generalized_iso
+        - generalized_aniso
+        - plateau_iso
+        - plateau_aniso
+      kernel_prob2: [0.45, 0.25, 0.12, 0.03, 0.12, 0.03]
+      sinc_prob2: 0.1
+      blur_sigma2: [0.2, 1.2]
+      betag_range2: [0.5, 4.0]
+      betap_range2: [1, 2.0]
+
+      final_sinc_prob: 0.5
+
+      gt_size: ${degradation.gt_size}
+      crop_pad_size: 300
+      use_hflip: True
+      use_rot: True
+      rescale_gt: True
+
+  val:
+    type: base
+    params:
+      dir_path: /blue/rcstudents/btulu/Projects/Image_enhancement/Diff_model/data/farm_sr/LR/val
+      im_exts:
+        - png
+        - jpg
+        - jpeg
+        - tif
+        - tiff
+      transform_type: default
+      transform_kwargs:
+        mean: 0.5
+        std: 0.5
+      extra_dir_path: /blue/rcstudents/btulu/Projects/Image_enhancement/Diff_model/data/farm_sr/HR/val
+      extra_transform_type: default
+      extra_transform_kwargs:
+        mean: 0.5
+        std: 0.5
+      recursive: False
+
+train:
+  # learning rate
+  lr: 5e-5
+  lr_min: 2e-5
+  lr_schedule: cosin
+  warmup_iterations: 5000
+
+  # dataloader
+  batch: [4, 1]
+  microbatch: 1
+  num_workers: 6
+  prefetch_factor: 2
+
+  # optimization
+  weight_decay: 0
+  ema_rate: 0.9995         # slightly stronger EMA smoothing
+  iterations: 50000        # you can drop to 30000 for experiments if you want
+
+  # logging / checkpoints
+  save_freq: 10000
+  log_freq: [200, 2000, 1] # [train loss, train images, val images]
+
+  # *** Loss weights: pixel MSE + LPIPS ***
+  # [latent_mse, lpips, pixel_mse]
+  loss_coef: [0.0, 0.5, 1.0]
+
+  local_logging: True
+  tf_logging: False
+
+  # validation
+  use_ema_val: True
+  val_freq: ${train.save_freq}
+  val_y_channel: True
+  val_resolution: ${model.params.lq_size}
+  val_padding_mode: reflect
+
+  # training misc
+  use_amp: True
+  seed: 123456
+  global_seeding: False
+
+  compile:
+    flag: False
+    mode: reduce-overhead
